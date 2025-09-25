@@ -4,6 +4,7 @@ import asyncio
 import os
 import httpx
 import json
+import jwt
 from app.models import (
     Funds,
     Profit,
@@ -29,6 +30,7 @@ from app.services.kotak import (
     CLIENT_CODE,
 )
 from app.workers.auto_sell import AutoSellWorker
+from app.token_store import TokenStore
 
 app = FastAPI(title="OQE Trading Backend", version="1.0.0")
 
@@ -44,6 +46,7 @@ app.add_middleware(
 # Single shared client + worker
 k = KotakClient()
 worker = AutoSellWorker(k)
+token_store = TokenStore()
 
 # -------- Lifecycle --------
 @app.on_event("startup")
@@ -201,20 +204,25 @@ async def login_validate(data: LoginValidateRequest):
     base_url = "https://gw-napi.kotaksecurities.com"
     path = "/login/1.0/login/v2/validate"
     # Headers you got from step 1
+    sid = await token_store.get_token("sid")
+    access_token = await token_store.get_token("access_token")
+    sub = await token_store.get_token("sub")
     headers = {
         "accept": "*/*",
-        "sid": os.getenv("SID"),         # generated in step 1
-        "Auth": os.getenv("ACCESS_TOKEN"), # token from step 1
+        "sid": sid,         # generated in step 1
+        "Auth": access_token, # token from step 1
         "Authorization": f"Bearer {os.getenv('KOTAK_ACCESS_TOKEN')}",
         "Content-Type": "application/json"
     }
-    print(headers,"HEADERS")
-    body = {"userId": data.userId, "otp": data.otp}
+    body = {"userId": sub, "otp": data.otp}
 
     try:
         async with httpx.AsyncClient(base_url=base_url, timeout=8.0) as client:
             r = await client.post(path, json=body, headers=headers)
             r.raise_for_status()
+            data = r.json()
+            trade_token = data["data"]["token"]
+            await token_store.set_token("trade_token",trade_token)
             return r.json()  # contains session token, sid, ucc, etc.
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
@@ -247,6 +255,14 @@ async def generate_view_token(data: LoginRequest):
         async with httpx.AsyncClient(base_url=base_url, timeout=8.0) as client:
             response = await client.post(path, json=body, headers=headers)
             response.raise_for_status()
+            data = response.json()
+            token = data['data']['token']
+            sid = data['data']['sid']
+            decoded = jwt.decode(token, options={"verify_signature": False})
+            sub = decoded.get("sub") 
+            await token_store.set_token("access_token", token)
+            await token_store.set_token("sid", sid)
+            await token_store.set_token("sub",sub)
             return response.json()  # contains view token and sid
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
@@ -254,7 +270,7 @@ async def generate_view_token(data: LoginRequest):
         raise HTTPException(status_code=500, detail=str(e))
     
 @app.post("/login/otp/generate")
-async def generate_otp(data: GenerateOtpRequest):
+async def generate_otp():
     base_url = "https://gw-napi.kotaksecurities.com"
     path = "/login/1.0/login/otp/generate"
 
@@ -264,11 +280,11 @@ async def generate_otp(data: GenerateOtpRequest):
         "Content-Type": "application/json",
         "Authorization": f"Bearer {os.getenv('KOTAK_ACCESS_TOKEN')}"  # Set your access token in env
     }
-
+    sub = await token_store.get_token("sub")
     body = {
-        "userId": data.userId,
-        "sendEmail": data.sendEmail,
-        "isWhitelisted": data.isWhitelisted
+        "userId":sub,
+        "sendEmail": True,
+        "isWhitelisted": True,
     }
     print(body)
     try:

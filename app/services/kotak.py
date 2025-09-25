@@ -312,7 +312,6 @@ class GenerateOtpRequest(BaseModel):
     isWhitelisted: bool = True
 
 class LoginValidateRequest(BaseModel):
-    userId: str
     otp: str
 
 class FundsLimitsRequest(BaseModel):
