@@ -330,16 +330,18 @@ async def get_user_limits(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     
-@app.post("/check-margin")
+@app.post("/check-funds")
 async def check_margin(sId: str = "server1"):
     """
     Wrapper for Kotak Check Margin API.
     """
-
+    sid = await token_store.get_token("sid")
+    trade_token = await token_store.get_token("trade_token")
+    print(trade_token,"TRADE TOKEN")
     headers = {
         "accept": "application/json",
-        "Sid": os.getenv("SID"),   # sessionId from Login API
-        "Auth": os.getenv("TRADE_ACCESS_TOKEN"),
+        "Sid": sid,   # sessionId from Login API
+        "Auth":trade_token,
         "Authorization": f"Bearer {os.getenv('KOTAK_ACCESS_TOKEN')}",  # Bearer access token
         "neo-fin-key": "neotradeapi",
         "Content-Type": "application/x-www-form-urlencoded"
@@ -374,3 +376,53 @@ async def check_margin(sId: str = "server1"):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+async def place_order(order_payload: dict):
+    sid = await token_store.get_token("sid")
+    trade_token = await token_store.get_token("trade_token")
+
+    headers = {
+        "accept": "application/json",
+        "Sid": sid,
+        "Auth": trade_token,
+        "Authorization": f"Bearer {os.getenv('KOTAK_ACCESS_TOKEN')}",
+        "neo-fin-key": "neotradeapi",
+        "Content-Type": "application/x-www-form-urlencoded",  # ✅ as per Kotak spec
+    }               
+    # Kotak requires: jData=<json string>
+    form_data = {
+        "jData": json.dumps(order_payload)
+    }
+
+    PLACE_ORDER_PATH = "/Orders/2.0/quick/order/rule/ms/place"
+    print(BASE_URL,"BASE")
+    print(PLACE_ORDER_PATH,"PLACE ORDER")
+    async with httpx.AsyncClient(base_url=BASE_URL, timeout=10.0) as client:
+        try:
+            response = await client.post(PLACE_ORDER_PATH, data=form_data, headers=headers)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/orders/normal")
+async def place_normal_order():
+    payload = """{
+        "am":"NO",
+        "dq":"0",
+        "es":"nse_cm",
+        "mp":"0",
+        "pc":"CNC",
+        "pf":"N",
+        "pr":"6.50",
+        "pt":"L",
+        "qt":"1",
+        "rt":"DAY",
+        "tp":"0",
+        "ts":"IDEA-EQ",
+        "tt":"B"
+    }"""  # ✅ needs to be string, not dict
+
+    return await place_order(payload)

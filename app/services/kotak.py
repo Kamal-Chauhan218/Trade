@@ -48,7 +48,7 @@ class OrderRequest(BaseModel):
     tag: Optional[str] = Field(default=None, description="Optional client tag")
 
 # ============ ENV ============
-KOTAK_BASE_URL = os.getenv("KOTAK_BASE_URL", "").rstrip("/")
+KOTAK_BASE_URL = os.getenv("BASE_URL", "").rstrip("/")
 KOTAK_AUTH_MODE = os.getenv("KOTAK_AUTH_MODE", "bearer").lower()
 
 KOTAK_API_KEY = os.getenv("KOTAK_API_KEY", "")
