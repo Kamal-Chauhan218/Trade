@@ -5,6 +5,8 @@ import os
 import httpx
 import json
 import jwt
+import pandas as pd
+
 from app.models import (
     Funds,
     Profit,
@@ -31,6 +33,7 @@ from app.services.kotak import (
 )
 from app.workers.auto_sell import AutoSellWorker
 from app.token_store import TokenStore
+from fastapi import Body
 
 app = FastAPI(title="OQE Trading Backend", version="1.0.0")
 
@@ -360,7 +363,6 @@ async def check_margin(sId: str = "server1"):
         "tok": "11536",
         "trnsTp": "B"
     }
-
     # ✅ wrap JSON inside jData string
     form_data = {"jData": json.dumps(jdata)}
 
@@ -376,8 +378,9 @@ async def check_margin(sId: str = "server1"):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
-async def place_order(order_payload: dict):
+
+@app.post("/orders/normal")
+async def place_order(orderData: dict = Body(...)):
     sid = await token_store.get_token("sid")
     trade_token = await token_store.get_token("trade_token")
 
@@ -387,16 +390,13 @@ async def place_order(order_payload: dict):
         "Auth": trade_token,
         "Authorization": f"Bearer {os.getenv('KOTAK_ACCESS_TOKEN')}",
         "neo-fin-key": "neotradeapi",
-        "Content-Type": "application/x-www-form-urlencoded",  # ✅ as per Kotak spec
-    }               
-    # Kotak requires: jData=<json string>
-    form_data = {
-        "jData": json.dumps(order_payload)
+        "Content-Type": "application/x-www-form-urlencoded",  # required
     }
 
+    form_data = {"jData": json.dumps(orderData)}
+
     PLACE_ORDER_PATH = "/Orders/2.0/quick/order/rule/ms/place"
-    print(BASE_URL,"BASE")
-    print(PLACE_ORDER_PATH,"PLACE ORDER")
+
     async with httpx.AsyncClient(base_url=BASE_URL, timeout=10.0) as client:
         try:
             response = await client.post(PLACE_ORDER_PATH, data=form_data, headers=headers)
@@ -407,22 +407,153 @@ async def place_order(order_payload: dict):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/orders/normal")
-async def place_normal_order():
-    payload = """{
-        "am":"NO",
-        "dq":"0",
-        "es":"nse_cm",
-        "mp":"0",
-        "pc":"CNC",
-        "pf":"N",
-        "pr":"6.50",
-        "pt":"L",
-        "qt":"1",
-        "rt":"DAY",
-        "tp":"0",
-        "ts":"IDEA-EQ",
-        "tt":"B"
-    }"""  # ✅ needs to be string, not dict
+@app.post("/orders/modify")
+async def modify_order(orderData: dict = Body(...)):
+    sid = await token_store.get_token("sid")
+    trade_token = await token_store.get_token("trade_token")
+    # hs_server_id = await token_store.get_token("hsServerId") or ""   # optional
 
-    return await place_order(payload)
+    headers = {
+        "accept": "application/json",
+        "Sid": sid,
+        "Auth": trade_token,
+        "Authorization": f"Bearer {os.getenv('KOTAK_ACCESS_TOKEN')}",
+        "neo-fin-key": "neotradeapi",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+
+    form_data = {"jData": json.dumps(orderData)}
+
+    MODIFY_ORDER_PATH = "/Orders/2.0/quick/order/vr/modify"
+
+    async with httpx.AsyncClient(base_url=BASE_URL, timeout=10.0) as client:
+        try:
+            response = await client.post(MODIFY_ORDER_PATH, data=form_data, headers=headers)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+
+
+@app.post("/orders/cancel")
+async def cancel_order(order: dict = Body(...)):
+    """
+    Cancel an order in Kotak API
+    Body Example:
+    {
+        "on": "2105199703091997",
+        "am": "NO",
+        "ts": "TCS-EQ"   # optional, only required if AMO
+    }
+    """
+    sid = await token_store.get_token("sid")
+    trade_token = await token_store.get_token("trade_token")
+
+    headers = {
+        "accept": "application/json",
+        "Sid": sid,
+        "Auth": trade_token,
+        "Authorization": f"Bearer {os.getenv('KOTAK_ACCESS_TOKEN')}",
+        "neo-fin-key": "neotradeapi",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+
+    form_data = {"jData": json.dumps(order)}
+
+    CANCEL_ORDER_PATH = "/Orders/2.0/quick/order/cancel"
+
+    async with httpx.AsyncClient(base_url=BASE_URL, timeout=10.0) as client:
+        try:
+            response = await client.post(CANCEL_ORDER_PATH, data=form_data, headers=headers)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        
+
+@app.get("/portfolio/holdings")
+async def get_holdings():
+    sid = await token_store.get_token("sid")
+    trade_token = await token_store.get_token("trade_token")
+
+    headers = {
+        "accept": "*/*",
+        "Sid": sid,
+        "Auth": trade_token,
+        "Authorization": f"Bearer {os.getenv('KOTAK_ACCESS_TOKEN')}",
+        "neo-fin-key": "neotradeapi",  
+    }
+
+    params = {"alt": "false"}  # convert Python bool → "true"/"false"
+
+    HOLDINGS_PATH = "/Portfolio/1.0/portfolio/v1/holdings"
+
+    async with httpx.AsyncClient(base_url=BASE_URL, timeout=10.0) as client:
+        try:
+            response = await client.get(HOLDINGS_PATH, params=params, headers=headers)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+
+
+@app.get("/master-scrip")
+async def get_master_scrip():
+    BASE_URL = "https://gw-napi.kotaksecurities.com/Files/1.0/masterscrip/v2/file-paths"
+
+    """
+    Fetch master scrip file paths from Kotak API
+    """
+    headers = {
+        "accept": "*/*",
+        "Authorization": f"Bearer {os.getenv('KOTAK_ACCESS_TOKEN')}"  # Store token in .env
+    }
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            response = await client.get(BASE_URL, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+
+            # Extract filesPaths directly
+            file_paths = data.get("data", {}).get("filesPaths", [])
+
+            return {
+                "status": "success",
+                "count": len(file_paths),
+                "files": file_paths
+            }
+
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/intial/scrips")
+async def get_scrips(limit: int = 10):
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    CSV_FILE = os.path.join(BASE_DIR, "nse_cm-v1.csv")    
+    try:
+        df = pd.read_csv(CSV_FILE)
+
+        # Replace NaN, inf, -inf with None (valid JSON null)
+        df = df.replace([pd.NA, float("nan"), float("inf"), float("-inf")], None)
+        df = df.where(pd.notnull(df), None)
+
+        # Convert first `limit` rows to dictionary
+        data = df.head(limit).to_dict(orient="records")
+
+        return {"count": len(data), "data": data}
+
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="CSV file not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
