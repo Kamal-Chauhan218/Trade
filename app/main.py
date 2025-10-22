@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException,Query,Request
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import os
@@ -6,6 +6,10 @@ import httpx
 import json
 import jwt
 import pandas as pd
+import numpy as np
+import boto3
+from datetime import datetime
+import uuid
 
 from app.models import (
     Funds,
@@ -34,6 +38,7 @@ from app.services.kotak import (
 from app.workers.auto_sell import AutoSellWorker
 from app.token_store import TokenStore
 from fastapi import Body
+from boto3.dynamodb.conditions import Key
 
 app = FastAPI(title="OQE Trading Backend", version="1.0.0")
 
@@ -341,6 +346,7 @@ async def check_margin(sId: str = "server1"):
     sid = await token_store.get_token("sid")
     trade_token = await token_store.get_token("trade_token")
     print(trade_token,"TRADE TOKEN")
+    print(sid,"SIDDD")
     headers = {
         "accept": "application/json",
         "Sid": sid,   # sessionId from Login API
@@ -557,3 +563,110 @@ async def get_scrips(limit: int = 10):
         raise HTTPException(status_code=404, detail="CSV file not found")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/get_stock_data")
+async def get_scrips(
+    limit: int = 10,
+    search: str | None = Query(None, description="Search by symbol name (e.g. VENKEYS)")
+):
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    CSV_FILE = os.path.join(BASE_DIR, "nse_cm-v1.csv")
+
+    try:
+        # Read CSV safely (read everything as string)
+        df = pd.read_csv(CSV_FILE, low_memory=False)
+
+        # Clean out all non-JSON values
+        df = df.replace([np.nan, np.inf, -np.inf], None)
+
+        if search:
+            # Search by symbol name (case-insensitive)
+            if "pSymbolName" in df.columns:
+                df = df[df["pSymbolName"].astype(str).str.contains(search, case=False, na=False)]
+            else:
+                raise HTTPException(status_code=400, detail="Column 'pSymbolName' not found in CSV")
+
+        # Limit to given number of rows
+        df = df.head(limit)
+
+        # Convert to JSON-safe Python objects
+        data = df.to_dict(orient="records")
+
+        return {"count": len(data), "data": data}
+
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="CSV file not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+    
+# AWS DYNAMO DB
+
+dynamodb = boto3.resource(
+    'dynamodb',
+    region_name=os.getenv("AWS_DEFAULT_REGION"),
+    aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+    aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY")
+)
+table = dynamodb.Table('watchlists')
+
+@app.post("/watchlists")
+def create_watchlist(user_id: str, name: str, stocks: list):
+    watchlist_id = str(uuid.uuid4())
+    item = {
+        "user_id": user_id,
+        "watchlist_id": watchlist_id,
+        "name": name,
+        "stocks": stocks,
+        "created_at": datetime.utcnow().isoformat(),
+        "updated_at": datetime.utcnow().isoformat()
+    }
+    table.put_item(Item=item)
+    return {"message": "Watchlist created", "watchlist_id": watchlist_id}
+
+#Fetching all watchlist according to user
+
+@app.get("/watchlists/{user_id}")
+def get_user_watchlists(user_id: str):
+    response = table.query(
+        KeyConditionExpression=Key("user_id").eq(user_id)
+    )
+    return {"watchlists": response["Items"]}
+
+# ADDING STOCK TO WATCH LIST
+# 🟢 Create or Add Stocks to a Watchlist
+@app.post("/watchlists/add-stocks")
+async def add_stocks(request: Request):
+    body = await request.json()
+    user_id = body["user_id"]
+    watchlist_id = body["watchlist_id"]
+    new_stocks = body["stocks"]
+
+    # Add stocks or create a new watchlist if not exists
+    response = table.update_item(
+        Key={
+            "user_id": user_id,
+            "watchlist_id": watchlist_id
+        },
+        UpdateExpression="SET stocks = list_append(if_not_exists(stocks, :empty_list), :new_stocks)",
+        ExpressionAttributeValues={
+            ":new_stocks": new_stocks,
+            ":empty_list": []
+        },
+        ReturnValues="UPDATED_NEW"
+    )
+
+    return {"message": "Stocks added successfully", "updated_stocks": response["Attributes"]["stocks"]}
+
+
+# 🔵 Get specific watchlist for a user
+@app.get("/watchlists/{user_id}/{watchlist_id}")
+def get_watchlist(user_id: str, watchlist_id: str):
+    response = table.get_item(
+        Key={
+            "user_id": user_id,
+            "watchlist_id": watchlist_id
+        }
+    )
+    return response.get("Item", {"message": "Watchlist not found"})
