@@ -10,6 +10,7 @@ import numpy as np
 import boto3
 from datetime import datetime
 import uuid
+import re
 
 from app.models import (
     Funds,
@@ -41,6 +42,7 @@ from fastapi import Body
 from boto3.dynamodb.conditions import Key
 
 app = FastAPI(title="OQE Trading Backend", version="1.0.0")
+LOG_FILE = os.path.join(os.path.dirname(__file__), "trades.txt")
 
 # CORS (relax during dev; tighten in prod)
 app.add_middleware(
@@ -568,29 +570,41 @@ async def get_scrips(limit: int = 10):
 @app.get("/get_stock_data")
 async def get_scrips(
     limit: int = 10,
-    search: str | None = Query(None, description="Search by symbol name (e.g. VENKEYS)")
+    search: str | None = Query(None, description="Search by symbol name or F&O (e.g. NIFTY 25800, ASIANPAINT)")
 ):
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    CSV_FILE = os.path.join(BASE_DIR, "nse_cm-v1.csv")
+    CSV_FILE_CM = os.path.join(BASE_DIR, "nse_cm-v1.csv")
+    CSV_FILE_FO = os.path.join(BASE_DIR, "updated_nse_fo.csv")
 
     try:
-        # Read CSV safely (read everything as string)
-        df = pd.read_csv(CSV_FILE, low_memory=False)
+        # Load both CSVs
+        df_cm = pd.read_csv(CSV_FILE_CM, low_memory=False)
+        df_fo = pd.read_csv(CSV_FILE_FO, low_memory=False)
 
-        # Clean out all non-JSON values
-        df = df.replace([np.nan, np.inf, -np.inf], None)
+        # Replace invalid values
+        df_cm = df_cm.replace([np.nan, np.inf, -np.inf], None)
+        df_fo = df_fo.replace([np.nan, np.inf, -np.inf], None)
 
+        # Add source identifiers
+        df_cm["source"] = "CM"
+        df_fo["source"] = "FO"
+
+        # Use existing 'pSymbolName' from CSV directly
+        df_cm["pCleanSymbol"] = df_cm["pSymbolName"]
+        df_fo["pCleanSymbol"] = df_fo["pSymbolName"]  # Already formatted by your CSV update script
+
+        # Combine both
+        df = pd.concat([df_cm, df_fo], ignore_index=True, sort=False)
+
+        # Filter by search term
         if search:
-            # Search by symbol name (case-insensitive)
-            if "pSymbolName" in df.columns:
-                df = df[df["pSymbolName"].astype(str).str.contains(search, case=False, na=False)]
-            else:
-                raise HTTPException(status_code=400, detail="Column 'pSymbolName' not found in CSV")
+            df = df[df["pCleanSymbol"].astype(str).str.contains(search, case=False, na=False)]
 
-        # Limit to given number of rows
+        # Limit
         df = df.head(limit)
+        df = df.astype(object).where(pd.notnull(df), None)
 
-        # Convert to JSON-safe Python objects
+        # Convert to JSON
         data = df.to_dict(orient="records")
 
         return {"count": len(data), "data": data}
@@ -670,3 +684,21 @@ def get_watchlist(user_id: str, watchlist_id: str):
         }
     )
     return response.get("Item", {"message": "Watchlist not found"})
+
+@app.post("/logTrade")
+async def log_trade(request: Request):
+    try:
+        data = await request.json()
+        message = data.get("message")
+
+        if not message:
+            return {"status": "error", "detail": "No message provided"}
+
+        # Ensure the file exists and write message
+        with open(LOG_FILE, "a") as f:
+            f.write(f"{message}\n")
+
+        return {"status": "success", "detail": "Message logged successfully"}
+
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
