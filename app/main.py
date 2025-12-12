@@ -685,6 +685,8 @@ def get_watchlist(user_id: str, watchlist_id: str):
     )
     return response.get("Item", {"message": "Watchlist not found"})
 
+LOG_DIR = "logs"
+
 @app.post("/logTrade")
 async def log_trade(request: Request):
     try:
@@ -694,11 +696,26 @@ async def log_trade(request: Request):
         if not message:
             return {"status": "error", "detail": "No message provided"}
 
-        # Ensure the file exists and write message
-        with open(LOG_FILE, "a") as f:
-            f.write(f"{message}\n")
+        # Try to parse JSON (for cases like {"type": "TRADE_LOG", "data": {...}})
+        try:
+            parsed = json.loads(message)
+            log_type = parsed.get("type", "UNKNOWN")
+            payload = parsed.get("data", message)
+        except Exception:
+            log_type = "RAW"
+            payload = message
 
-        return {"status": "success", "detail": "Message logged successfully"}
+        # ✅ Ensure 'logs' folder exists before writing
+        os.makedirs(LOG_DIR, exist_ok=True)
+
+        # ✅ Log file path based on type
+        log_file = os.path.join(LOG_DIR, f"{log_type}.log")
+
+        # ✅ Append log entry with timestamp
+        with open(log_file, "a") as f:
+            f.write(f"{datetime.now().isoformat()} | {json.dumps(payload)}\n")
+
+        return {"status": "success", "detail": f"Message logged to {log_file}"}
 
     except Exception as e:
         return {"status": "error", "detail": str(e)}
